@@ -13,8 +13,8 @@ class ArbitrageDirection(Enum):
     BACKWARD = 1
 
 
-class TArbTaskConfig(ExecutorConfigBase):
-    type: str = "tarb_executor"
+class TriangularArbExecutorConfig(ExecutorConfigBase):
+    type: str = "triangular_arb_executor"
     arb_asset: str
     arb_asset_wrapped: str
     proxy_asset: str
@@ -41,6 +41,10 @@ class InProgress:
     def buy_order(self) -> TrackedOrder:
         return self._buy_order
 
+    @buy_order.setter
+    def buy_order(self, order: TrackedOrder):
+        self._buy_order = order
+
     def update_buy_order(self, order: InFlightOrder):
         self._buy_order.order = order
 
@@ -48,12 +52,20 @@ class InProgress:
     def proxy_order(self) -> TrackedOrder:
         return self._proxy_order
 
+    @proxy_order.setter
+    def proxy_order(self, order: TrackedOrder):
+        self._proxy_order = order
+
     def update_proxy_order(self, order: InFlightOrder):
         self._proxy_order.order = order
 
     @property
     def sell_order(self) -> TrackedOrder:
         return self._sell_order
+
+    @sell_order.setter
+    def sell_order(self, order: TrackedOrder):
+        self._sell_order = order
 
     def update_sell_order(self, order: InFlightOrder):
         self._sell_order.order = order
@@ -68,6 +80,7 @@ class Completed:
 
 class FailureReason(Enum):
     INSUFFICIENT_BALANCE = 0
+    TOO_MANY_FAILURES = 1
 
 
 class Failed:

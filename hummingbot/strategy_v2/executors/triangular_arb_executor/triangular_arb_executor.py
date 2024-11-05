@@ -1,27 +1,29 @@
+import asyncio
 import logging
 from typing import Optional, Union
 
 from hummingbot.connector.connector_base import ConnectorBase
 from hummingbot.core.data_type.common import OrderType, TradeType
-from hummingbot.core.event.events import BuyOrderCreatedEvent, SellOrderCreatedEvent
+from hummingbot.core.event.events import BuyOrderCreatedEvent, MarketOrderFailureEvent, SellOrderCreatedEvent
 from hummingbot.logger import HummingbotLogger
 from hummingbot.strategy.script_strategy_base import ScriptStrategyBase
 from hummingbot.strategy_v2.executors.data_types import ConnectorPair
 from hummingbot.strategy_v2.executors.executor_base import ExecutorBase
-from hummingbot.strategy_v2.executors.tarb_executor.data_types import (
+from hummingbot.strategy_v2.executors.triangular_arb_executor.data_types import (
     ArbitrageDirection,
     Completed,
     Failed,
     FailureReason,
     Idle,
     InProgress,
-    TArbTaskConfig,
+    TriangularArbExecutorConfig,
 )
 from hummingbot.strategy_v2.models.executors import TrackedOrder
 
 
-class TArbExecutor(ExecutorBase):
+class TriangularArbExecutor(ExecutorBase):
     _logger = None
+    _cumulative_failures: int = 0
 
     @classmethod
     def logger(cls) -> HummingbotLogger:
@@ -33,7 +35,7 @@ class TArbExecutor(ExecutorBase):
     def is_closed(self):
         return type(self.state) is Completed or type(self.state) is Failed
 
-    def __init__(self, strategy: ScriptStrategyBase, config: TArbTaskConfig, update_interval: float = 1.0):
+    def __init__(self, strategy: ScriptStrategyBase, config: TriangularArbExecutorConfig, update_interval: float = 1.0):
         super().__init__(strategy=strategy,
                          connectors=[config.buying_market.connector_name,
                                      config.proxy_market.connector_name,
@@ -92,17 +94,24 @@ class TArbExecutor(ExecutorBase):
             await self.init_arbitrage()
         elif type(self.state) is InProgress:
             state = self.state
-            if state.buy_order.is_filled and state.proxy_order.is_filled and state.sell_order.is_filled:
+            if self._cumulative_failures > self.max_retries:
+                self.state = Failed(FailureReason.TOO_MANY_FAILURES)
+                self.stop()
+            elif state.buy_order.is_filled and state.proxy_order.is_filled and state.sell_order.is_filled:
                 self.state = Completed(buy_order_exec_price=state.buy_order.average_executed_price,
                                        proxy_order_exec_price=state.proxy_order.average_executed_price,
                                        sell_order_exec_price=state.sell_order.average_executed_price)
                 self.stop()
 
     async def init_arbitrage(self):
+        buy_order = asyncio.create_task(self.place_buy_order())
+        proxy_order = asyncio.create_task(self.place_proxy_order())
+        sell_order = asyncio.create_task(self.place_sell_order())
+        buy_order, proxy_order, sell_order = await asyncio.gather(buy_order, proxy_order, sell_order)
         self.state = InProgress(
-            buy_order=await self.place_buy_order(),
-            proxy_order=await self.place_proxy_order(),
-            sell_order=await self.place_sell_order(),
+            buy_order=buy_order,
+            proxy_order=proxy_order,
+            sell_order=sell_order,
         )
 
     async def place_buy_order(self) -> TrackedOrder:
@@ -140,6 +149,17 @@ class TArbExecutor(ExecutorBase):
             elif order_id == self.state.sell_order.order_id:
                 self.logger().info("Sell order created")
                 self.state.update_sell_order(self.get_in_flight_order(self._selling_market.connector_name, order_id))
+
+    def process_order_failed_event(self, _, market, event: MarketOrderFailureEvent):
+        self._cumulative_failures += 1
+        if type(self.state) is InProgress and self._cumulative_failures < self.max_retries:
+            order_id = event.order_id
+            if order_id == self.state.buy_order.order_id:
+                self.state.buy_order = asyncio.run(self.place_sell_order())
+            elif order_id == self.state.proxy_order.order_id:
+                self.state.proxy_order = asyncio.run(self.place_proxy_order())
+            elif order_id == self.state.sell_order.order_id:
+                self.state.sell_order = asyncio.run(self.place_sell_order())
 
 
 def is_valid_arbitrage(arb_asset: str,
